@@ -1,0 +1,121 @@
+library(tidyverse)
+library(readr)
+library(tidymodels)
+library(ggiraph)
+library(lme4)
+library(janitor)
+library(bsselectR)
+library(maps)
+library(mapproj)
+library(sf)
+library(ggthemes)
+
+options(scipen = 999)
+
+natality0306 <- read_delim("~/Documents/Birth Rate Analysis/Natality, 2003-2006.txt","\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  clean_names() %>% 
+  select(-notes)
+
+natality0719 <- read_delim("~/Documents/Birth Rate Analysis/Natality, 2007-2019.txt", "\t", escape_double = FALSE, trim_ws = TRUE)%>% 
+  clean_names() %>% 
+  select(-notes)
+
+natality <- bind_rows(natality0306, natality0719) %>% 
+  filter(!is.na(state))
+
+spending <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-09-15/kids.csv') %>%
+  mutate(perchild_k = inf_adj_perchild*1000) %>%
+  mutate(spending_cat = case_when(
+    variable %in% c(
+      "PK12ed", "edservs", "edsubs", "highered", "pell", "HeadStartPriv"
+    ) ~ "Education",
+    variable %in% c(
+      "TANFbasic", "SNAP", "othercashserv", "socsec", "fedSSI"
+    ) ~ "Safety Net/Welfare",
+    variable %in% c(
+      "fedEITC", "stateEITC", "CTC", "addCC"
+    ) ~ "Tax Credits",
+    variable %in% c(
+      "unemp", "wcomp"
+    ) ~ "Unemployment/Work Comp",
+    variable %in% c(
+      "Medicaid_CHIP", "pubhealth", "other_health"
+    ) ~ "Health",
+    variable %in% c(
+      "HCD", "lib", "parkrec"
+    ) ~ "Other"
+  ))  %>%
+  group_by(state, year, spending_cat) %>%
+  summarise(perchild_k = sum(perchild_k)) %>%
+  pivot_wider(names_from = spending_cat, values_from = perchild_k) %>%
+  rename(ed_spending = Education,
+         welfare_spending = `Safety Net/Welfare`,
+         health_spending = Health,
+         unemp_spending = `Unemployment/Work Comp`,
+         taxcred_spending = `Tax Credits`,
+         other_spending = Other) %>%
+  mutate(total_spending =
+           sum(ed_spending + welfare_spending + health_spending +
+                 unemp_spending + taxcred_spending + other_spending))
+
+st_crosswalk <- tibble(state = state.name) %>%
+  bind_cols(tibble(abb = state.abb))
+
+welfare <- readxl::read_excel("~/Documents/Birth Rate Analysis/UKCPR_Update.xlsx", sheet = "Data") %>% 
+  clean_names() %>% 
+  left_join(st_crosswalk, by = c("state_name" = "abb")) %>% 
+  select(state = state.y, state.x, year, population, employment, unemployment, unemployment_rate, gross_state_product, poverty_rate, governor_is_democrat_1_yes, afdc_tanf_recipients, afdc_tanf_benefit_for_3_person_family, number_of_poor_thousands)
+
+full_data <- 
+  left_join(natality, spending, by = c("state", "year")) %>% 
+  left_join(welfare, by = c("state", "year")) %>% 
+  filter(state != "District of Columbia", year < 2017)
+
+
+full_data %>% 
+  ggplot(aes(x = year, y = total_spending)) +
+  geom_line(aes(group = 1)) +
+  # scale_y_continuous(limits = c(0,70), breaks = seq(0, 70, 10)) +
+  facet_wrap(~state)
+
+full_data %>% 
+  ggplot(aes(x = total_spending, y = fertility_rate, color = governor_is_democrat_1_yes)) +
+  geom_point() +
+  facet_wrap(~year)
+
+simple_reg <- lm(fertility_rate ~ total_spending + population + unemployment_rate + poverty_rate + 
+                   as_factor(governor_is_democrat_1_yes), 
+                 data = filter(full_data, year == 2016))
+
+reg <- tidy(simple_reg, conf.int = T)
+
+states <- map_data("state")
+
+full_data$state = tolower(full_data$state)
+
+state_year <- states %>% 
+  left_join(full_data, by = c("region" = "state"))
+
+ggplot(data = state_year, 
+       aes(x = long, y = lat, group = group, fill = fertility_rate)) +
+  geom_polygon() +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  facet_wrap(~year) +
+  theme_map() +
+  theme(
+    legend.position = "right"
+  )
+
+year16 <- filter(state_year, year == 2016)
+
+p <- ggplot(data = state_year,
+            aes(x = long, y = lat, group = group, fill = fertility_rate, 
+                tooltip = fertility_rate, 
+                data_id = region)) +
+  geom_polygon_interactive(color = 'gray70') +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  labs(title = "US State Fertility Rate by State, 2016", 
+       subtitle = "Hover over state to see fertility rate") +
+  theme_map()
+
+girafe(code = print(p))
